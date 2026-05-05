@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StokKu - Cloud Inventory & Sales</title>
+    <title>StokKu - Smart Inventory</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -11,28 +11,32 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/html5-qrcode"></script>
     
-    <!-- Firebase SDK -->
+    <!-- Firebase SDK (Hanya dimuat jika diperlukan) -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        
-        window.FirebaseSDK = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc };
+        if (typeof __firebase_config !== 'undefined') {
+            import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+            import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+            import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+            window.FirebaseSDK = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc };
+        }
     </script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-        body { font-family: 'Plus Jakarta Sans', sans-serif; }
-        #reader__scan_region video { border-radius: 1rem; }
+        body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
+        #reader__scan_region video { border-radius: 1.5rem; object-fit: cover; }
         @media print {
             body * { visibility: hidden; }
             #receipt-print, #receipt-print * { visibility: visible; }
             #receipt-print { position: absolute; left: 0; top: 0; width: 100%; }
             .no-print { display: none !important; }
         }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
     </style>
 </head>
-<body class="bg-slate-50">
+<body class="bg-slate-50 text-slate-900">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -54,7 +58,6 @@
 
         const App = () => {
             const [view, setView] = useState('inventory');
-            const [user, setUser] = useState(null);
             const [items, setItems] = useState([]);
             const [salesHistory, setSalesHistory] = useState([]);
             const [cart, setCart] = useState([]);
@@ -64,92 +67,77 @@
             const [lastTransaction, setLastTransaction] = useState(null);
             const [editingItem, setEditingItem] = useState(null);
             const [isLoading, setIsLoading] = useState(true);
-            const [error, setError] = useState(null);
+            const [storageMode, setStorageMode] = useState('local'); // 'local' or 'cloud'
             
             const html5QrCode = useRef(null);
             const [formData, setFormData] = useState({
-                barcode: '', name: '', category: '', stock: 0, unit: '', price: 0, minStock: 5
+                barcode: '', name: '', category: '', stock: 0, unit: 'Pcs', price: 0, minStock: 5
             });
 
-            // Inisialisasi Firebase dengan Error Handling
+            // Inisialisasi Storage (Hybrid)
             useEffect(() => {
-                let checkCount = 0;
-                const maxChecks = 30; // 3 detik
+                const initStorage = async () => {
+                    // Cek apakah lingkungan mendukung Cloud
+                    if (window.FirebaseSDK && typeof __firebase_config !== 'undefined') {
+                        try {
+                            const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, collection, onSnapshot } = window.FirebaseSDK;
+                            const firebaseConfig = JSON.parse(__firebase_config);
+                            const app = initializeApp(firebaseConfig);
+                            const auth = getAuth(app);
+                            const db = getFirestore(app);
+                            window.db = db;
 
-                const initFirebase = async () => {
-                    try {
-                        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore } = window.FirebaseSDK;
-                        
-                        // Cek apakah config tersedia
-                        if (typeof __firebase_config === 'undefined') {
-                            throw new Error("Konfigurasi Cloud tidak ditemukan. Jalankan di lingkungan yang sesuai.");
-                        }
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
 
-                        const firebaseConfig = JSON.parse(__firebase_config);
-                        const app = initializeApp(firebaseConfig);
-                        const auth = getAuth(app);
-                        const db = getFirestore(app);
-                        
-                        window.db = db;
-                        
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
+                            onAuthStateChanged(auth, (user) => {
+                                if (user) {
+                                    setStorageMode('cloud');
+                                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                                    
+                                    // Listen Items
+                                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'items'), (snap) => {
+                                        setItems(snap.docs.map(doc => ({ ...doc.data(), id: doc.id })));
+                                        setIsLoading(false);
+                                    });
+
+                                    // Listen Sales
+                                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'sales'), (snap) => {
+                                        const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+                                        setSalesHistory(data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
+                                    });
+                                }
+                            });
+                        } catch (e) {
+                            switchToLocal();
                         }
-                        
-                        onAuthStateChanged(auth, (u) => {
-                            setUser(u);
-                            if (!u) setIsLoading(false);
-                        });
-                    } catch (err) {
-                        console.error(err);
-                        setError(err.message);
-                        setIsLoading(false);
+                    } else {
+                        switchToLocal();
                     }
                 };
 
-                const interval = setInterval(() => {
-                    checkCount++;
-                    if (window.FirebaseSDK) {
-                        clearInterval(interval);
-                        initFirebase();
-                    } else if (checkCount >= maxChecks) {
-                        clearInterval(interval);
-                        setError("Gagal memuat SDK Cloud. Periksa koneksi internet Anda.");
-                        setIsLoading(false);
-                    }
-                }, 100);
+                const switchToLocal = () => {
+                    setStorageMode('local');
+                    const localItems = JSON.parse(localStorage.getItem('stokku_items') || '[]');
+                    const localSales = JSON.parse(localStorage.getItem('stokku_sales') || '[]');
+                    setItems(localItems);
+                    setSalesHistory(localSales);
+                    setIsLoading(false);
+                };
 
-                return () => clearInterval(interval);
+                initStorage();
             }, []);
 
-            // Real-time Data Listener
+            // Sync ke LocalStorage jika mode 'local'
             useEffect(() => {
-                if (!user || !window.db) return;
-                
-                const { collection, onSnapshot } = window.FirebaseSDK;
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-                const itemsCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'items');
-                const unsubItems = onSnapshot(itemsCol, (snapshot) => {
-                    const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-                    setItems(data);
-                    setIsLoading(false);
-                }, (err) => {
-                    console.error(err);
-                    setIsLoading(false);
-                });
-
-                const salesCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'sales');
-                const unsubSales = onSnapshot(salesCol, (snapshot) => {
-                    const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-                    data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-                    setSalesHistory(data);
-                });
-
-                return () => { unsubItems(); unsubSales(); };
-            }, [user]);
+                if (storageMode === 'local') {
+                    localStorage.setItem('stokku_items', JSON.stringify(items));
+                    localStorage.setItem('stokku_sales', JSON.stringify(salesHistory));
+                }
+            }, [items, salesHistory, storageMode]);
 
             const filteredItems = useMemo(() => {
                 return items.filter(item => 
@@ -162,15 +150,15 @@
             const startScanner = async () => {
                 setIsScannerOpen(true);
                 setTimeout(() => {
-                    if (html5QrCode.current) {
-                        html5QrCode.current.stop().catch(() => {});
-                    }
                     html5QrCode.current = new Html5Qrcode("reader");
                     html5QrCode.current.start(
                         { facingMode: "environment" }, 
-                        { fps: 20, qrbox: 250 },
+                        { fps: 20, qrbox: { width: 250, height: 250 } },
                         (text) => handleScanSuccess(text)
-                    ).catch(err => console.error(err));
+                    ).catch(err => {
+                        alert("Gagal membuka kamera. Pastikan izin kamera diberikan.");
+                        setIsScannerOpen(false);
+                    });
                 }, 300);
             };
 
@@ -186,8 +174,7 @@
                     if (found) addToCart(found);
                     else alert("Barang tidak terdaftar!");
                 } else {
-                    if (found) handleOpenModal(found);
-                    else handleOpenModal(null, text);
+                    handleOpenModal(found || null, found ? '' : text);
                 }
             };
 
@@ -198,47 +185,46 @@
                     setFormData({ ...item });
                 } else {
                     setEditingItem(null);
-                    setFormData({ barcode: scannedBarcode, name: '', category: '', stock: 0, unit: '', price: 0, minStock: 5 });
+                    setFormData({ barcode: scannedBarcode, name: '', category: '', stock: 0, unit: 'Pcs', price: 0, minStock: 5 });
                 }
                 setIsModalOpen(true);
             };
 
             const handleSave = async (e) => {
                 e.preventDefault();
-                if (!user) return;
-                const { collection, doc, setDoc, addDoc } = window.FirebaseSDK;
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-                const itemsCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'items');
-
-                try {
+                if (storageMode === 'cloud') {
+                    const { collection, doc, setDoc, addDoc } = window.FirebaseSDK;
+                    const appId = __app_id || 'default-app-id';
+                    const col = collection(window.db, 'artifacts', appId, 'public', 'data', 'items');
+                    if (editingItem) await setDoc(doc(col, editingItem.id), formData);
+                    else await addDoc(col, formData);
+                } else {
                     if (editingItem) {
-                        await setDoc(doc(itemsCol, editingItem.id), formData);
+                        setItems(items.map(i => i.id === editingItem.id ? { ...formData, id: i.id } : i));
                     } else {
-                        await addDoc(itemsCol, formData);
+                        setItems([...items, { ...formData, id: Date.now() }]);
                     }
-                    setIsModalOpen(false);
-                } catch (err) {
-                    alert("Gagal menyimpan!");
                 }
+                setIsModalOpen(false);
             };
 
             const handleDelete = async (id) => {
-                if (!user || !confirm('Hapus barang ini?')) return;
-                const { collection, doc, deleteDoc } = window.FirebaseSDK;
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-                try {
+                if (!confirm('Hapus barang ini?')) return;
+                if (storageMode === 'cloud') {
+                    const { doc, deleteDoc } = window.FirebaseSDK;
+                    const appId = __app_id || 'default-app-id';
                     await deleteDoc(doc(window.db, 'artifacts', appId, 'public', 'data', 'items', id));
-                } catch (err) {
-                    alert("Gagal menghapus!");
+                } else {
+                    setItems(items.filter(i => i.id !== id));
                 }
             };
 
-            // Sales logic
+            // Sales Logic
             const addToCart = (item) => {
                 if (item.stock <= 0) return alert("Stok habis!");
                 const existing = cart.find(c => c.id === item.id);
                 if (existing) {
-                    if (existing.qty >= item.stock) return alert("Stok tidak cukup!");
+                    if (existing.qty >= item.stock) return alert("Stok tidak mencukupi!");
                     setCart(cart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c));
                 } else {
                     setCart([...cart, { ...item, qty: 1 }]);
@@ -246,10 +232,7 @@
             };
 
             const checkout = async () => {
-                if (cart.length === 0 || !user) return;
-                const { collection, addDoc, doc, updateDoc } = window.FirebaseSDK;
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-                
+                if (cart.length === 0) return;
                 const transaction = {
                     date: new Date().toLocaleString(),
                     timestamp: new Date().toISOString(),
@@ -257,149 +240,148 @@
                     total: cart.reduce((acc, curr) => acc + (curr.price * curr.qty), 0)
                 };
 
-                try {
+                if (storageMode === 'cloud') {
+                    const { collection, addDoc, doc, updateDoc } = window.FirebaseSDK;
+                    const appId = __app_id || 'default-app-id';
                     const trxRef = await addDoc(collection(window.db, 'artifacts', appId, 'public', 'data', 'sales'), transaction);
                     for (const item of cart) {
-                        const itemRef = doc(window.db, 'artifacts', appId, 'public', 'data', 'items', item.id);
-                        await updateDoc(itemRef, { stock: item.stock - item.qty });
+                        await updateDoc(doc(window.db, 'artifacts', appId, 'public', 'data', 'items', item.id), { stock: item.stock - item.qty });
                     }
                     setLastTransaction({ ...transaction, id: trxRef.id });
-                    setCart([]);
-                } catch (err) {
-                    alert("Transaksi gagal!");
+                } else {
+                    const trxId = `TRX-${Date.now()}`;
+                    setSalesHistory([{ ...transaction, id: trxId }, ...salesHistory]);
+                    setItems(items.map(item => {
+                        const cartItem = cart.find(c => c.id === item.id);
+                        return cartItem ? { ...item, stock: item.stock - cartItem.qty } : item;
+                    }));
+                    setLastTransaction({ ...transaction, id: trxId });
                 }
+                setCart([]);
             };
 
             if (isLoading) return (
                 <div className="min-h-screen flex items-center justify-center bg-slate-50">
                     <div className="flex flex-col items-center gap-4">
-                        <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                        <p className="text-slate-400 font-medium">Menghubungkan ke Cloud...</p>
-                    </div>
-                </div>
-            );
-
-            if (error) return (
-                <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
-                    <div className="bg-white p-8 rounded-3xl shadow-xl max-w-md w-full text-center">
-                        <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <Icon name="AlertCircle" size={32} />
-                        </div>
-                        <h2 className="text-xl font-bold mb-2">Terjadi Kesalahan</h2>
-                        <p className="text-slate-500 mb-6">{error}</p>
-                        <button onClick={() => window.location.reload()} className="w-full py-3 bg-slate-800 text-white rounded-xl font-bold">Coba Lagi</button>
+                        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                        <p className="text-slate-500 font-bold">Menyiapkan Aplikasi...</p>
                     </div>
                 </div>
             );
 
             return (
-                <div className="min-h-screen bg-slate-50 pb-20">
-                    <nav className="bg-white border-b sticky top-0 z-40 no-print">
-                        <div className="max-w-7xl mx-auto px-4 flex justify-between items-center h-16">
-                            <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
-                                <Icon name="Package" /> <span>StokKu</span>
-                            </div>
-                            <div className="flex gap-2">
-                                <button onClick={() => setView('inventory')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'inventory' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
-                                    <Icon name="LayoutDashboard" size={18} /> <span className="hidden md:inline">Stok</span>
-                                </button>
-                                <button onClick={() => setView('sales')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'sales' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
-                                    <Icon name="ShoppingCart" size={18} /> <span className="hidden md:inline">Jual</span>
-                                </button>
-                                <button onClick={() => setView('history')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'history' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
-                                    <Icon name="History" size={18} /> <span className="hidden md:inline">Riwayat</span>
-                                </button>
-                            </div>
+                <div className="min-h-screen flex flex-col max-w-md mx-auto bg-white shadow-2xl relative border-x border-slate-100">
+                    {/* Header */}
+                    <nav className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-40 px-4 h-16 flex items-center justify-between no-print">
+                        <div className="flex items-center gap-2 font-black text-xl text-blue-600">
+                            <Icon name="Package" /> <span>StokKu</span>
+                        </div>
+                        <div className="flex items-center gap-1 text-[10px] font-bold px-2 py-1 bg-slate-100 rounded-full text-slate-500">
+                            <div className={`w-2 h-2 rounded-full ${storageMode === 'cloud' ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
+                            {storageMode === 'cloud' ? 'ONLINE' : 'LOKAL'}
                         </div>
                     </nav>
 
-                    <main className="max-w-7xl mx-auto p-4 md:p-8 no-print">
+                    {/* Main Content */}
+                    <main className="flex-1 overflow-y-auto custom-scrollbar p-4 pb-24 no-print">
                         {view === 'inventory' && (
-                            <div>
-                                <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-                                    <h1 className="text-2xl font-bold">Inventaris</h1>
-                                    <div className="flex gap-2 w-full md:w-auto">
-                                        <button onClick={startScanner} className="flex-1 bg-white border-2 border-blue-600 text-blue-600 px-4 py-2 rounded-xl font-bold flex justify-center gap-2"><Icon name="ScanLine" /> Scan</button>
-                                        <button onClick={() => handleOpenModal()} className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-xl font-bold shadow-lg flex justify-center gap-2"><Icon name="Plus" /> Tambah</button>
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-end">
+                                    <div>
+                                        <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Inventaris</h1>
+                                        <p className="text-sm text-slate-400">Kelola stok barang Anda</p>
                                     </div>
-                                </header>
-                                <div className="bg-white p-4 rounded-2xl border mb-6 flex gap-4 shadow-sm">
-                                    <div className="flex-1 relative">
-                                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"><Icon name="Search" size={16} /></div>
-                                        <input type="text" placeholder="Cari barang atau barcode..." className="w-full bg-slate-50 border pl-10 p-2 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
-                                    </div>
+                                    <button onClick={() => handleOpenModal()} className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-200 active:scale-90 transition-all">
+                                        <Icon name="Plus" />
+                                    </button>
                                 </div>
-                                <div className="bg-white rounded-2xl border overflow-hidden shadow-sm">
-                                    <table className="w-full text-left">
-                                        <thead className="bg-slate-50 text-slate-600 text-xs uppercase tracking-wider">
-                                            <tr><th className="p-4">Produk</th><th className="p-4">Stok</th><th className="p-4">Harga</th><th className="p-4 text-right">Aksi</th></tr>
-                                        </thead>
-                                        <tbody className="divide-y">
-                                            {filteredItems.map(item => (
-                                                <tr key={item.id} className="hover:bg-slate-50/50">
-                                                    <td className="p-4">
-                                                        <div className="font-bold">{item.name}</div>
-                                                        <div className="text-xs text-slate-400 font-mono">{item.barcode || 'TANPA BARCODE'}</div>
-                                                    </td>
-                                                    <td className="p-4 font-medium">
-                                                        {item.stock} <span className="text-slate-400 text-xs">{item.unit}</span>
-                                                        {item.stock <= item.minStock && <div className="text-[10px] text-amber-500 font-bold uppercase mt-1">Stok Rendah</div>}
-                                                    </td>
-                                                    <td className="p-4 font-medium">Rp {item.price.toLocaleString()}</td>
-                                                    <td className="p-4 text-right flex justify-end gap-2">
-                                                        <button onClick={() => handleOpenModal(item)} className="p-2 text-slate-400 hover:text-blue-600"><Icon name="Edit3" size={18} /></button>
-                                                        <button onClick={() => handleDelete(item.id)} className="p-2 text-slate-400 hover:text-red-600"><Icon name="Trash2" size={18} /></button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+
+                                <div className="relative">
+                                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"><Icon name="Search" size={18} /></div>
+                                    <input 
+                                        type="text" placeholder="Cari nama atau barcode..." 
+                                        className="w-full bg-slate-100 border-none pl-12 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 transition-all font-medium"
+                                        value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                                    />
+                                    <button onClick={startScanner} className="absolute right-4 top-1/2 -translate-y-1/2 text-blue-600 p-1"><Icon name="ScanLine" /></button>
+                                </div>
+
+                                <div className="space-y-3">
+                                    {filteredItems.map(item => (
+                                        <div key={item.id} className="bg-white border border-slate-100 p-4 rounded-3xl flex justify-between items-center shadow-sm hover:shadow-md transition-shadow">
+                                            <div className="flex-1">
+                                                <div className="font-bold text-slate-800 text-lg leading-tight">{item.name}</div>
+                                                <div className="flex items-center gap-2 mt-1">
+                                                    <span className="text-xs font-mono text-slate-400">{item.barcode || '---'}</span>
+                                                    <span className="text-[10px] px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full font-bold uppercase">{item.category}</span>
+                                                </div>
+                                                <div className="mt-3 flex items-center gap-4">
+                                                    <div className="text-blue-600 font-bold">Rp {item.price.toLocaleString()}</div>
+                                                    <div className={`text-xs font-black uppercase px-2 py-1 rounded-lg ${item.stock <= 0 ? 'bg-red-50 text-red-500' : item.stock <= item.minStock ? 'bg-amber-50 text-amber-500' : 'bg-emerald-50 text-emerald-500'}`}>
+                                                        {item.stock} {item.unit}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="flex flex-col gap-2">
+                                                <button onClick={() => handleOpenModal(item)} className="p-2 text-slate-300 hover:text-blue-600"><Icon name="Edit3" size={18} /></button>
+                                                <button onClick={() => handleDelete(item.id)} className="p-2 text-slate-300 hover:text-red-600"><Icon name="Trash2" size={18} /></button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {filteredItems.length === 0 && <div className="text-center py-20 text-slate-300 italic">Data tidak ditemukan</div>}
                                 </div>
                             </div>
                         )}
 
                         {view === 'sales' && (
-                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                <div className="lg:col-span-2">
-                                    <div className="flex justify-between items-center mb-6">
-                                        <h1 className="text-2xl font-bold text-slate-800">Kasir</h1>
-                                        <button onClick={startScanner} className="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold shadow-md flex items-center gap-2 transition-transform active:scale-95"><Icon name="ScanLine" /> Scan Barcode</button>
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-end mb-6">
+                                    <div>
+                                        <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Kasir</h1>
+                                        <p className="text-sm text-slate-400">Proses transaksi cepat</p>
                                     </div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                        {items.filter(i => i.stock > 0).map(item => (
-                                            <button key={item.id} onClick={() => addToCart(item)} className="bg-white p-4 rounded-xl border text-left hover:border-blue-500 hover:shadow-md transition-all flex flex-col justify-between shadow-sm active:bg-blue-50">
-                                                <div><div className="font-bold text-slate-800">{item.name}</div><div className="text-xs text-slate-400 mb-2 mt-1">Stok: {item.stock} {item.unit}</div></div>
-                                                <div className="text-blue-600 font-bold">Rp {item.price.toLocaleString()}</div>
-                                            </button>
-                                        ))}
-                                    </div>
+                                    <button onClick={startScanner} className="flex items-center gap-2 bg-blue-600 text-white px-5 py-3 rounded-2xl font-bold shadow-lg shadow-blue-200 active:scale-95 transition-all">
+                                        <Icon name="ScanLine" size={18} /> <span>Scan</span>
+                                    </button>
                                 </div>
-                                <div className="bg-white rounded-3xl border shadow-lg p-6 flex flex-col h-fit sticky top-24 border-blue-100">
-                                    <h2 className="text-lg font-bold mb-4 border-b pb-4 flex items-center gap-2"><Icon name="ShoppingCart" className="text-blue-500" /> Keranjang</h2>
-                                    <div className="space-y-4 mb-6 max-h-80 overflow-y-auto pr-2">
-                                        {cart.length === 0 ? <div className="text-center py-8 text-slate-400 italic">Belum ada barang</div> : cart.map(item => (
-                                            <div key={item.id} className="flex justify-between items-start gap-2 border-b border-slate-50 pb-2">
-                                                <div className="flex-1"><div className="font-bold text-sm leading-tight">{item.name}</div><div className="text-[10px] text-slate-500 mt-1">{item.qty} x Rp {item.price.toLocaleString()}</div></div>
-                                                <div className="flex items-center gap-2 font-bold text-sm">Rp {(item.qty * item.price).toLocaleString()} <button onClick={() => setCart(cart.filter(c=>c.id!==item.id))} className="text-red-400 p-1 hover:bg-red-50 rounded"><Icon name="X" size={14} /></button></div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="border-t pt-4 space-y-4">
-                                        <div className="flex justify-between text-xl font-bold"><span>Total</span><span className="text-blue-600">Rp {cart.reduce((a,c)=>a+(c.price*c.qty),0).toLocaleString()}</span></div>
-                                        <button onClick={checkout} disabled={cart.length === 0} className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold disabled:bg-slate-200 transition-all shadow-lg active:scale-95">Bayar Sekarang</button>
-                                    </div>
+
+                                <div className="grid grid-cols-2 gap-3 mb-8">
+                                    {items.filter(i => i.stock > 0).map(item => (
+                                        <button 
+                                            key={item.id} onClick={() => addToCart(item)}
+                                            className="bg-white border p-3 rounded-2xl text-left hover:border-blue-500 transition-all active:bg-blue-50"
+                                        >
+                                            <div className="font-bold text-sm line-clamp-1">{item.name}</div>
+                                            <div className="text-[10px] text-slate-400 mb-2">Stok: {item.stock}</div>
+                                            <div className="text-blue-600 font-bold text-sm">Rp {item.price.toLocaleString()}</div>
+                                        </button>
+                                    ))}
                                 </div>
                             </div>
                         )}
 
                         {view === 'history' && (
-                            <div>
-                                <h1 className="text-2xl font-bold mb-8 text-slate-800">Riwayat Penjualan</h1>
+                            <div className="space-y-6">
+                                <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Riwayat</h1>
                                 <div className="space-y-4">
-                                    {salesHistory.length === 0 ? <div className="bg-white p-12 text-center text-slate-400 rounded-3xl border border-dashed">Tidak ada transaksi</div> : salesHistory.map(trx => (
-                                        <div key={trx.id} className="bg-white p-6 rounded-2xl border flex flex-col md:flex-row justify-between gap-4 shadow-sm hover:shadow-md transition-shadow">
-                                            <div><div className="font-bold text-blue-600">{trx.id}</div><div className="text-[10px] text-slate-400 font-bold uppercase mb-2 tracking-widest">{trx.date}</div><div className="text-sm text-slate-600">{trx.items.map(i => `${i.name} (${i.qty})`).join(', ')}</div></div>
-                                            <div className="flex flex-col md:items-end justify-between"><div className="font-bold text-lg text-slate-800">Rp {trx.total.toLocaleString()}</div><button onClick={() => { setLastTransaction(trx); setTimeout(() => window.print(), 500); }} className="text-blue-600 text-sm font-bold flex items-center gap-1 mt-2 hover:bg-blue-50 p-2 rounded-lg"><Icon name="Printer" size={14} /> Cetak Struk</button></div>
+                                    {salesHistory.map(trx => (
+                                        <div key={trx.id} className="bg-white border p-4 rounded-3xl shadow-sm">
+                                            <div className="flex justify-between items-start mb-2">
+                                                <div>
+                                                    <div className="text-blue-600 font-bold text-xs">{trx.id}</div>
+                                                    <div className="text-[10px] text-slate-400 font-bold uppercase">{trx.date}</div>
+                                                </div>
+                                                <div className="text-right">
+                                                    <div className="font-black text-lg">Rp {trx.total.toLocaleString()}</div>
+                                                </div>
+                                            </div>
+                                            <div className="text-xs text-slate-500 line-clamp-1 mb-3">{trx.items.map(i => `${i.name} (${i.qty})`).join(', ')}</div>
+                                            <button 
+                                                onClick={() => { setLastTransaction(trx); setTimeout(() => window.print(), 500); }}
+                                                className="w-full py-2 bg-slate-50 text-slate-600 rounded-xl text-xs font-bold flex items-center justify-center gap-2"
+                                            >
+                                                <Icon name="Printer" size={14} /> Cetak Struk
+                                            </button>
                                         </div>
                                     ))}
                                 </div>
@@ -407,49 +389,113 @@
                         )}
                     </main>
 
-                    {/* Receipt (Hanya tampil saat Print) */}
-                    {lastTransaction && (
-                        <div id="receipt-print" className="hidden print:block p-8 bg-white max-w-[80mm] mx-auto text-[10px] leading-tight font-mono">
-                            <div className="text-center border-b border-dashed pb-4 mb-4"><h2 className="text-lg font-bold">STOKKU</h2><p className="mt-1">Struk Penjualan</p><p className="text-[8px] mt-1">{lastTransaction.date}</p><p className="text-[8px]">{lastTransaction.id}</p></div>
-                            <div className="mb-4 space-y-1">{lastTransaction.items.map(item => (
-                                <div key={item.id} className="flex justify-between"><span>{item.name} x{item.qty}</span><span>Rp {(item.qty*item.price).toLocaleString()}</span></div>
-                            ))}</div>
-                            <div className="border-t border-dashed pt-4 flex justify-between font-bold text-sm"><span>TOTAL</span><span>Rp {lastTransaction.total.toLocaleString()}</span></div>
-                            <div className="text-center mt-10 text-[8px] italic border-t border-dashed pt-4"><p>Terima kasih atas pembelian Anda!</p></div>
+                    {/* Footer Nav */}
+                    <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/90 backdrop-blur-xl border-t flex justify-around p-3 no-print z-40 rounded-t-[2.5rem] shadow-2xl">
+                        <button onClick={() => setView('inventory')} className={`flex flex-col items-center gap-1 p-2 rounded-2xl transition-all ${view === 'inventory' ? 'text-blue-600' : 'text-slate-300'}`}>
+                            <Icon name="LayoutGrid" size={24} />
+                            <span className="text-[10px] font-bold uppercase">Stok</span>
+                        </button>
+                        <button onClick={() => setView('sales')} className={`flex flex-col items-center gap-1 p-2 rounded-2xl transition-all ${view === 'sales' ? 'text-blue-600' : 'text-slate-300'}`}>
+                            <Icon name="ShoppingCart" size={24} />
+                            <span className="text-[10px] font-bold uppercase">Jual</span>
+                        </button>
+                        <button onClick={() => setView('history')} className={`flex flex-col items-center gap-1 p-2 rounded-2xl transition-all ${view === 'history' ? 'text-blue-600' : 'text-slate-300'}`}>
+                            <Icon name="History" size={24} />
+                            <span className="text-[10px] font-bold uppercase">Riwayat</span>
+                        </button>
+                    </div>
+
+                    {/* Sales Modal (Cart) */}
+                    {view === 'sales' && cart.length > 0 && (
+                        <div className="fixed bottom-24 left-4 right-4 max-w-[calc(28rem-2rem)] mx-auto bg-slate-900 text-white p-6 rounded-[2rem] shadow-2xl z-50 flex flex-col gap-4 no-print animate-in slide-in-from-bottom duration-300">
+                            <div className="flex justify-between items-center border-b border-white/10 pb-4">
+                                <span className="font-bold">{cart.length} Item dipilih</span>
+                                <button onClick={() => setCart([])} className="text-white/40"><Icon name="X" size={16} /></button>
+                            </div>
+                            <div className="max-h-40 overflow-y-auto custom-scrollbar space-y-2 pr-2">
+                                {cart.map(item => (
+                                    <div key={item.id} className="flex justify-between text-xs">
+                                        <span>{item.qty}x {item.name}</span>
+                                        <div className="flex items-center gap-3">
+                                            <span>Rp {(item.qty*item.price).toLocaleString()}</span>
+                                            <button onClick={() => setCart(cart.filter(c=>c.id!==item.id))} className="text-red-400"><Icon name="X" size={12} /></button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex justify-between items-center pt-2">
+                                <div className="text-xs text-white/50">Total Bayar</div>
+                                <div className="text-xl font-black text-blue-400">Rp {cart.reduce((a,c)=>a+(c.price*c.qty),0).toLocaleString()}</div>
+                            </div>
+                            <button onClick={checkout} className="w-full py-4 bg-blue-600 rounded-2xl font-black tracking-widest active:scale-95 transition-all shadow-lg shadow-blue-900/40">BAYAR</button>
                         </div>
                     )}
 
-                    {/* Scanner Modal */}
+                    {/* Forms & Scanner Modals */}
                     {isScannerOpen && (
-                        <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-4 backdrop-blur-sm">
-                            <div className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl">
-                                <div className="p-4 border-b flex justify-between items-center bg-slate-50"><h3 className="font-bold flex items-center gap-2 text-slate-700"><Icon name="ScanLine" /> Scan Barcode</h3><button onClick={stopScanner} className="p-2 bg-white border shadow-sm rounded-full active:bg-slate-100 transition-colors"><Icon name="X" /></button></div>
-                                <div id="reader" className="bg-black aspect-square"></div>
-                                <div className="p-6 bg-slate-50"><button onClick={stopScanner} className="w-full py-4 bg-slate-800 text-white font-bold rounded-2xl shadow-lg active:scale-95 transition-all uppercase tracking-widest">Tutup Kamera</button></div>
+                        <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center p-6 no-print">
+                            <div className="w-full max-w-sm bg-white rounded-[2.5rem] overflow-hidden shadow-2xl">
+                                <div className="p-6 border-b flex justify-between items-center">
+                                    <h3 className="font-black text-slate-800">SCAN BARCODE</h3>
+                                    <button onClick={stopScanner} className="p-2 bg-slate-100 rounded-full"><Icon name="X" /></button>
+                                </div>
+                                <div id="reader" className="bg-slate-900"></div>
+                                <div className="p-6 bg-white"><button onClick={stopScanner} className="w-full py-4 bg-slate-800 text-white font-bold rounded-2xl uppercase tracking-widest">Batal</button></div>
                             </div>
                         </div>
                     )}
 
-                    {/* Form Modal */}
                     {isModalOpen && (
-                        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-                            <form onSubmit={handleSave} className="bg-white w-full max-w-md rounded-3xl p-6 space-y-4 shadow-2xl my-auto">
-                                <div className="flex justify-between items-center border-b pb-4"><h2 className="text-xl font-bold text-slate-800">{editingItem ? 'Edit Barang' : 'Tambah Barang'}</h2><button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-400 p-1"><Icon name="X" /></button></div>
-                                <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100"><label className="text-[10px] font-bold text-blue-600 block uppercase tracking-widest mb-1">Barcode</label><div className="flex items-center gap-2"><input className="w-full bg-transparent border-none p-0 focus:ring-0 text-lg font-mono text-blue-900" placeholder="0000000000" value={formData.barcode} onChange={e => setFormData({...formData, barcode: e.target.value})} /><Icon name="ScanLine" className="text-blue-400" /></div></div>
-                                <div className="space-y-4">
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Nama Produk</label><input placeholder="Contoh: Pulpen Kenko" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required /></div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Kategori</label><input placeholder="Alat Tulis" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} required /></div>
-                                        <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Satuan</label><input placeholder="Pcs" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})} required /></div>
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Stok</label><input type="number" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.stock} onChange={e => setFormData({...formData, stock: parseInt(e.target.value) || 0})} required /></div>
-                                        <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Min. Stok</label><input type="number" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.minStock} onChange={e => setFormData({...formData, minStock: parseInt(e.target.value) || 0})} required /></div>
-                                    </div>
-                                    <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block ml-1">Harga Jual (Rp)</label><input type="number" className="w-full border-slate-200 border p-3 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.price} onChange={e => setFormData({...formData, price: parseInt(e.target.value) || 0})} required /></div>
+                        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end justify-center no-print">
+                            <form onSubmit={handleSave} className="bg-white w-full max-w-md rounded-t-[3rem] p-8 space-y-5 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-black text-slate-800">{editingItem ? 'EDIT' : 'TAMBAH'} BARANG</h2>
+                                    <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-300"><Icon name="X" /></button>
                                 </div>
-                                <div className="flex gap-3 pt-4"><button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-4 text-slate-500 font-bold hover:bg-slate-50 rounded-2xl">Batal</button><button type="submit" className="flex-[2] py-4 bg-blue-600 text-white font-bold rounded-2xl shadow-lg shadow-blue-100 hover:bg-blue-700 active:scale-95 transition-all">Simpan Barang</button></div>
+                                <div className="bg-slate-50 p-4 rounded-3xl border flex items-center gap-3">
+                                    <div className="flex-1">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block">Barcode</label>
+                                        <input className="w-full bg-transparent border-none p-0 focus:ring-0 text-lg font-mono placeholder:text-slate-300" placeholder="0000000" value={formData.barcode} onChange={e => setFormData({...formData, barcode: e.target.value})} />
+                                    </div>
+                                    <div className="p-2 bg-white rounded-xl shadow-sm text-blue-500"><Icon name="ScanLine" /></div>
+                                </div>
+                                <div className="space-y-4">
+                                    <input placeholder="Nama Produk" className="w-full bg-slate-50 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required />
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <input placeholder="Kategori" className="bg-slate-50 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} required />
+                                        <input placeholder="Satuan" className="bg-slate-50 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})} required />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="bg-slate-50 p-4 rounded-2xl">
+                                            <label className="text-[10px] font-bold text-slate-400 block mb-1">STOK</label>
+                                            <input type="number" className="w-full bg-transparent border-none p-0 focus:ring-0 font-bold" value={formData.stock} onChange={e => setFormData({...formData, stock: parseInt(e.target.value) || 0})} required />
+                                        </div>
+                                        <div className="bg-slate-50 p-4 rounded-2xl">
+                                            <label className="text-[10px] font-bold text-slate-400 block mb-1">MIN. STOK</label>
+                                            <input type="number" className="w-full bg-transparent border-none p-0 focus:ring-0 font-bold" value={formData.minStock} onChange={e => setFormData({...formData, minStock: parseInt(e.target.value) || 0})} required />
+                                        </div>
+                                    </div>
+                                    <div className="bg-slate-50 p-4 rounded-2xl">
+                                        <label className="text-[10px] font-bold text-slate-400 block mb-1">HARGA SATUAN (RP)</label>
+                                        <input type="number" className="w-full bg-transparent border-none p-0 focus:ring-0 font-bold text-lg text-blue-600" value={formData.price} onChange={e => setFormData({...formData, price: parseInt(e.target.value) || 0})} required />
+                                    </div>
+                                </div>
+                                <div className="flex gap-4 pt-4">
+                                    <button type="submit" className="flex-[2] py-5 bg-blue-600 text-white font-black rounded-3xl shadow-xl shadow-blue-200">SIMPAN</button>
+                                </div>
                             </form>
+                        </div>
+                    )}
+
+                    {/* Receipt (Hanya tampil saat Print) */}
+                    {lastTransaction && (
+                        <div id="receipt-print" className="hidden print:block p-8 bg-white max-w-[80mm] mx-auto text-[10px] leading-tight font-mono">
+                            <div className="text-center border-b border-dashed pb-4 mb-4 font-bold"><h2 className="text-lg">STOKKU</h2><p>{lastTransaction.date}</p><p>{lastTransaction.id}</p></div>
+                            <div className="mb-4 space-y-1">{lastTransaction.items.map((item, idx) => (
+                                <div key={idx} className="flex justify-between"><span>{item.name} x{item.qty}</span><span>Rp {(item.qty*item.price).toLocaleString()}</span></div>
+                            ))}</div>
+                            <div className="border-t border-dashed pt-4 flex justify-between font-bold text-sm"><span>TOTAL</span><span>Rp {lastTransaction.total.toLocaleString()}</span></div>
+                            <div className="text-center mt-10 text-[8px] italic border-t border-dashed pt-4"><p>Terima kasih!</p></div>
                         </div>
                     )}
                 </div>
