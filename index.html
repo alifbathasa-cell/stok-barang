@@ -11,13 +11,11 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/html5-qrcode"></script>
     
-    <!-- Firebase SDK - Memperbaiki kesalahan sintaksis impor -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
-        // Mengekspos SDK ke global agar bisa diakses oleh skrip Babel
         window.FirebaseSDK = { 
             initializeApp, getAuth, signInAnonymously, signInWithCustomToken, 
             onAuthStateChanged, getFirestore, collection, doc, setDoc, 
@@ -29,12 +27,25 @@
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
         #reader__scan_region video { border-radius: 1.5rem; object-fit: cover; }
+        
         @media print {
-            body * { visibility: hidden; }
-            #receipt-print, #receipt-print * { visibility: visible; }
-            #receipt-print { position: absolute; left: 0; top: 0; width: 100%; }
-            .no-print { display: none !important; }
+            @page { margin: 0; size: 80mm auto; }
+            body { margin: 0; padding: 0; background: white; }
+            nav, main, footer, .no-print { display: none !important; }
+            #root { display: none !important; }
+            #receipt-print { 
+                display: block !important; 
+                visibility: visible !important;
+                width: 80mm;
+                padding: 4mm;
+                color: black;
+                font-family: 'Courier New', Courier, monospace;
+            }
+            #receipt-print * { visibility: visible !important; }
         }
+
+        #receipt-print { display: none; }
+
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
@@ -80,20 +91,17 @@
 
             useEffect(() => {
                 const initStorage = async () => {
-                    // Cek keberadaan SDK dan Config
                     const hasCloudConfig = typeof __firebase_config !== 'undefined' && __firebase_config !== "";
                     
                     if (window.FirebaseSDK && hasCloudConfig) {
                         try {
                             const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, collection, onSnapshot } = window.FirebaseSDK;
-                            
                             const firebaseConfig = JSON.parse(__firebase_config);
                             const app = initializeApp(firebaseConfig);
                             const auth = getAuth(app);
                             const db = getFirestore(app);
                             window.db = db;
 
-                            // Rule 3: Auth before queries
                             if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                                 await signInWithCustomToken(auth, __initial_auth_token);
                             } else {
@@ -105,18 +113,13 @@
                                     setStorageMode('cloud');
                                     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
                                     
-                                    // Rule 1: Strict Paths
-                                    const itemsPath = ['artifacts', appId, 'public', 'data', 'items'];
-                                    const salesPath = ['artifacts', appId, 'public', 'data', 'sales'];
-
-                                    onSnapshot(collection(db, ...itemsPath), (snap) => {
+                                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'items'), (snap) => {
                                         setItems(snap.docs.map(doc => ({ ...doc.data(), id: doc.id })));
                                         setIsLoading(false);
                                     }, () => switchToLocal());
 
-                                    onSnapshot(collection(db, ...salesPath), (snap) => {
+                                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'sales'), (snap) => {
                                         const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-                                        // Rule 2: In-memory sorting
                                         setSalesHistory(data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
                                     }, () => switchToLocal());
                                 } else {
@@ -153,7 +156,7 @@
             const filteredItems = useMemo(() => {
                 return items.filter(item => 
                     item.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                    (item.barcode && item.barcode.includes(searchTerm))
+                    (item.barcode && item.barcode.toString().includes(searchTerm))
                 );
             }, [items, searchTerm]);
 
@@ -179,11 +182,12 @@
 
             const handleScanSuccess = (text) => {
                 stopScanner();
-                const found = items.find(i => i.barcode === text);
+                const found = items.find(i => i.barcode && i.barcode.toString() === text.toString());
                 if (view === 'sales') {
                     if (found) addToCart(found);
                     else alert("Barang tidak terdaftar!");
                 } else {
+                    // Fix scanning for inventory/barang masuk
                     handleOpenModal(found || null, found ? '' : text);
                 }
             };
@@ -244,7 +248,7 @@
                 const transaction = {
                     date: new Date().toLocaleString(),
                     timestamp: new Date().toISOString(),
-                    items: cart.map(({id, name, qty, price}) => ({id, name, qty, price})),
+                    items: cart.map(({id, name, qty, price, barcode}) => ({id, name, qty, price, barcode})),
                     total: cart.reduce((acc, curr) => acc + (curr.price * curr.qty), 0)
                 };
 
@@ -258,7 +262,8 @@
                     setLastTransaction({ ...transaction, id: trxRef.id });
                 } else {
                     const trxId = `TRX-${Date.now()}`;
-                    setSalesHistory([{ ...transaction, id: trxId }, ...salesHistory]);
+                    const newSales = [{ ...transaction, id: trxId }, ...salesHistory];
+                    setSalesHistory(newSales);
                     setItems(items.map(item => {
                         const cartItem = cart.find(c => c.id === item.id);
                         return cartItem ? { ...item, stock: item.stock - cartItem.qty } : item;
@@ -279,6 +284,39 @@
 
             return (
                 <div className="min-h-screen flex flex-col max-w-md mx-auto bg-white shadow-2xl relative border-x border-slate-100">
+                    {/* Receipt Print Section (Standard 80mm) */}
+                    {lastTransaction && (
+                        <div id="receipt-print" className="p-4 bg-white text-black">
+                            <div className="text-center border-b-2 border-black pb-4 mb-4">
+                                <h2 className="text-xl font-bold">KERANJANG BERKAH</h2>
+                                <p className="text-[10px]">Pusat Belanja Berkah & Amanah</p>
+                                <p className="text-[8px] mt-1">{lastTransaction.date}</p>
+                                <p className="text-[8px]">{lastTransaction.id}</p>
+                            </div>
+                            <div className="space-y-3 mb-4">
+                                {lastTransaction.items.map((item, idx) => (
+                                    <div key={idx} className="text-[10px] border-b border-gray-100 pb-1">
+                                        <div className="flex justify-between font-bold">
+                                            <span>{item.name}</span>
+                                            <span>Rp {(item.qty * item.price).toLocaleString()}</span>
+                                        </div>
+                                        <div className="flex justify-between text-[8px] text-gray-600 mt-0.5">
+                                            <span>BC: {item.barcode || '-'}</span>
+                                            <span>{item.qty} Pcs x {item.price.toLocaleString()}</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="border-t-2 border-black pt-2 flex justify-between font-bold text-sm">
+                                <span>TOTAL</span>
+                                <span>Rp {lastTransaction.total.toLocaleString()}</span>
+                            </div>
+                            <div className="text-center mt-8 pt-4 border-t border-dotted border-black text-[9px] leading-tight">
+                                <p>Terimakasih sudah berbelanja di Keranjang Berkah, kami tunggu kembali pesanannya</p>
+                            </div>
+                        </div>
+                    )}
+
                     <nav className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-40 px-4 h-16 flex items-center justify-between no-print">
                         <div className="flex items-center gap-2 font-black text-xl text-blue-600">
                             <Icon name="Package" /> <span>StokKu</span>
@@ -295,7 +333,7 @@
                                 <div className="flex justify-between items-end">
                                     <div>
                                         <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Inventaris</h1>
-                                        <p className="text-sm text-slate-400">Kelola stok barang Anda</p>
+                                        <p className="text-sm text-slate-400">Barang Masuk & Stok</p>
                                     </div>
                                     <button onClick={() => handleOpenModal()} className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-200 active:scale-90 transition-all">
                                         <Icon name="Plus" />
@@ -328,9 +366,9 @@
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="flex flex-col gap-2">
-                                                <button onClick={() => handleOpenModal(item)} className="p-2 text-slate-300 hover:text-blue-600"><Icon name="Edit3" size={18} /></button>
-                                                <button onClick={() => handleDelete(item.id)} className="p-2 text-slate-300 hover:text-red-600"><Icon name="Trash2" size={18} /></button>
+                                            <div className="flex flex-col gap-2 ml-2">
+                                                <button onClick={() => handleOpenModal(item)} className="p-2.5 bg-blue-50 text-blue-600 rounded-xl active:scale-95"><Icon name="Edit3" size={18} /></button>
+                                                <button onClick={() => handleDelete(item.id)} className="p-2.5 bg-red-50 text-red-600 rounded-xl active:scale-95"><Icon name="Trash2" size={18} /></button>
                                             </div>
                                         </div>
                                     ))}
@@ -416,13 +454,13 @@
                                 <span className="font-bold">{cart.length} Item dipilih</span>
                                 <button onClick={() => setCart([])} className="text-white/40"><Icon name="X" size={16} /></button>
                             </div>
-                            <div className="max-h-40 overflow-y-auto custom-scrollbar space-y-2 pr-2">
+                            <div className="max-h-40 overflow-y-auto custom-scrollbar space-y-2 pr-2 text-[10px]">
                                 {cart.map(item => (
-                                    <div key={item.id} className="flex justify-between text-xs">
+                                    <div key={item.id} className="flex justify-between">
                                         <span>{item.qty}x {item.name}</span>
                                         <div className="flex items-center gap-3">
                                             <span>Rp {(item.qty*item.price).toLocaleString()}</span>
-                                            <button onClick={() => setCart(cart.filter(c=>c.id!==item.id))} className="text-red-400"><Icon name="X" size={12} /></button>
+                                            <button onClick={() => setCart(cart.filter(c=>c.id!==item.id))} className="text-red-400 p-1"><Icon name="X" size={12} /></button>
                                         </div>
                                     </div>
                                 ))}
@@ -431,7 +469,7 @@
                                 <div className="text-xs text-white/50">Total Bayar</div>
                                 <div className="text-xl font-black text-blue-400">Rp {cart.reduce((a,c)=>a+(c.price*c.qty),0).toLocaleString()}</div>
                             </div>
-                            <button onClick={checkout} className="w-full py-4 bg-blue-600 rounded-2xl font-black tracking-widest active:scale-95 transition-all shadow-lg shadow-blue-900/40">BAYAR</button>
+                            <button onClick={checkout} className="w-full py-4 bg-blue-600 rounded-2xl font-black tracking-widest active:scale-95 transition-all shadow-lg">BAYAR</button>
                         </div>
                     )}
 
@@ -450,10 +488,10 @@
 
                     {isModalOpen && (
                         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end justify-center no-print">
-                            <form onSubmit={handleSave} className="bg-white w-full max-w-md rounded-t-[3rem] p-8 space-y-5 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                            <form onSubmit={handleSave} className="bg-white w-full max-md:rounded-t-[3rem] md:rounded-[3rem] p-8 space-y-5 shadow-2xl animate-in slide-in-from-bottom duration-300">
                                 <div className="flex justify-between items-center">
                                     <h2 className="text-xl font-black text-slate-800">{editingItem ? 'EDIT' : 'TAMBAH'} BARANG</h2>
-                                    <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-300"><Icon name="X" /></button>
+                                    <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-300 p-2"><Icon name="X" /></button>
                                 </div>
                                 <div className="bg-slate-50 p-4 rounded-3xl border flex items-center gap-3">
                                     <div className="flex-1">
@@ -462,7 +500,7 @@
                                     </div>
                                     <div className="p-2 bg-white rounded-xl shadow-sm text-blue-500"><Icon name="ScanLine" /></div>
                                 </div>
-                                <div className="space-y-4">
+                                <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2 custom-scrollbar">
                                     <input placeholder="Nama Produk" className="w-full bg-slate-50 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required />
                                     <div className="grid grid-cols-2 gap-3">
                                         <input placeholder="Kategori" className="bg-slate-50 p-4 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} required />
@@ -484,20 +522,10 @@
                                     </div>
                                 </div>
                                 <div className="flex gap-4 pt-4">
-                                    <button type="submit" className="flex-[2] py-5 bg-blue-600 text-white font-black rounded-3xl shadow-xl shadow-blue-200">SIMPAN</button>
+                                    <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-5 bg-slate-100 text-slate-600 font-black rounded-3xl active:bg-slate-200 transition-all">BATAL</button>
+                                    <button type="submit" className="flex-[2] py-5 bg-blue-600 text-white font-black rounded-3xl shadow-xl shadow-blue-200 active:bg-blue-700 transition-all">SIMPAN</button>
                                 </div>
                             </form>
-                        </div>
-                    )}
-
-                    {lastTransaction && (
-                        <div id="receipt-print" className="hidden print:block p-8 bg-white max-w-[80mm] mx-auto text-[10px] leading-tight font-mono">
-                            <div className="text-center border-b border-dashed pb-4 mb-4 font-bold"><h2 className="text-lg">STOKKU</h2><p>{lastTransaction.date}</p><p>{lastTransaction.id}</p></div>
-                            <div className="mb-4 space-y-1">{lastTransaction.items.map((item, idx) => (
-                                <div key={idx} className="flex justify-between"><span>{item.name} x{item.qty}</span><span>Rp {(item.qty*item.price).toLocaleString()}</span></div>
-                            ))}</div>
-                            <div className="border-t border-dashed pt-4 flex justify-between font-bold text-sm"><span>TOTAL</span><span>Rp {lastTransaction.total.toLocaleString()}</span></div>
-                            <div className="text-center mt-10 text-[8px] italic border-t border-dashed pt-4"><p>Terima kasih!</p></div>
                         </div>
                     )}
                 </div>
