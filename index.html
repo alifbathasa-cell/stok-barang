@@ -3,21 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StokKu - Manajemen Inventaris</title>
-    <!-- Tailwind CSS -->
+    <title>StokKu - Cloud Inventory & Sales</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- React & Babel for Browser Parsing -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <!-- HTML5 QR Code Scanner -->
     <script src="https://unpkg.com/html5-qrcode"></script>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        window.FirebaseSDK = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDoc };
+    </script>
+
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; }
         #reader__scan_region video { border-radius: 1rem; }
+        @media print {
+            body * { visibility: hidden; }
+            #receipt-print, #receipt-print * { visibility: visible; }
+            #receipt-print { position: absolute; left: 0; top: 0; width: 100%; }
+            .no-print { display: none !important; }
+        }
     </style>
 </head>
 <body class="bg-slate-50">
@@ -25,7 +37,7 @@
 
     <script type="text/babel">
         const { useState, useMemo, useEffect, useRef } = React;
-        // Mock icons component for Lucide integration in browser
+
         const Icon = ({ name, size = 20, className = "" }) => {
             const [svg, setSvg] = useState('');
             useEffect(() => {
@@ -41,38 +53,93 @@
         };
 
         const App = () => {
-            const [items, setItems] = useState([
-                { id: 1, barcode: '899123456701', name: 'Kertas A4 80gr', category: 'Alat Tulis', stock: 45, unit: 'Rim', price: 55000, minStock: 10 },
-                { id: 2, barcode: '899123456702', name: 'Tinta Printer Hitam', category: 'Elektronik', stock: 5, unit: 'Botol', price: 95000, minStock: 8 },
-                { id: 3, barcode: '899123456703', name: 'Laptop Pro 14', category: 'Elektronik', stock: 12, unit: 'Unit', price: 15000000, minStock: 3 }
-            ]);
-
+            const [view, setView] = useState('inventory');
+            const [user, setUser] = useState(null);
+            const [items, setItems] = useState([]);
+            const [salesHistory, setSalesHistory] = useState([]);
+            const [cart, setCart] = useState([]);
             const [searchTerm, setSearchTerm] = useState('');
-            const [filterCategory, setFilterCategory] = useState('Semua');
             const [isModalOpen, setIsModalOpen] = useState(false);
             const [isScannerOpen, setIsScannerOpen] = useState(false);
+            const [lastTransaction, setLastTransaction] = useState(null);
             const [editingItem, setEditingItem] = useState(null);
+            const [isLoading, setIsLoading] = useState(true);
+            
             const html5QrCode = useRef(null);
-
             const [formData, setFormData] = useState({
                 barcode: '', name: '', category: '', stock: 0, unit: '', price: 0, minStock: 5
             });
 
-            const categories = ['Semua', ...new Set(items.map(item => item.category))];
+            // Firebase Config & Init
+            useEffect(() => {
+                const initFirebase = async () => {
+                    const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore } = window.FirebaseSDK;
+                    
+                    const firebaseConfig = JSON.parse(__firebase_config);
+                    const app = initializeApp(firebaseConfig);
+                    const auth = getAuth(app);
+                    const db = getFirestore(app);
+                    
+                    window.db = db; // Global ref for easy access
+                    
+                    // Auth Logic
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    
+                    onAuthStateChanged(auth, (u) => {
+                        setUser(u);
+                        if (!u) setIsLoading(false);
+                    });
+                };
+
+                if (window.FirebaseSDK) initFirebase();
+                else {
+                    const checkInterval = setInterval(() => {
+                        if (window.FirebaseSDK) {
+                            initFirebase();
+                            clearInterval(checkInterval);
+                        }
+                    }, 100);
+                }
+            }, []);
+
+            // Data Listeners
+            useEffect(() => {
+                if (!user) return;
+                const { collection, onSnapshot, query } = window.FirebaseSDK;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+                // Listen to Items
+                const itemsCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'items');
+                const unsubItems = onSnapshot(itemsCol, (snapshot) => {
+                    const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+                    setItems(data);
+                    setIsLoading(false);
+                }, (err) => console.error("Firestore Items Error:", err));
+
+                // Listen to Sales History
+                const salesCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'sales');
+                const unsubSales = onSnapshot(salesCol, (snapshot) => {
+                    const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+                    // Sort by date in memory (Rule 2)
+                    data.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                    setSalesHistory(data);
+                }, (err) => console.error("Firestore Sales Error:", err));
+
+                return () => { unsubItems(); unsubSales(); };
+            }, [user]);
+
             const filteredItems = useMemo(() => {
-                return items.filter(item => {
-                    const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase()) || (item.barcode && item.barcode.includes(searchTerm));
-                    return (filterCategory === 'Semua' || item.category === filterCategory) && matchesSearch;
-                });
-            }, [items, searchTerm, filterCategory]);
+                return items.filter(item => 
+                    item.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                    (item.barcode && item.barcode.includes(searchTerm))
+                );
+            }, [items, searchTerm]);
 
-            const stats = {
-                total: items.length,
-                low: items.filter(i => i.stock > 0 && i.stock <= i.minStock).length,
-                empty: items.filter(i => i.stock === 0).length,
-                value: items.reduce((acc, curr) => acc + (curr.price * curr.stock), 0)
-            };
-
+            // Scanner Logic
             const startScanner = async () => {
                 setIsScannerOpen(true);
                 setTimeout(() => {
@@ -93,14 +160,16 @@
             const handleScanSuccess = (text) => {
                 stopScanner();
                 const found = items.find(i => i.barcode === text);
-                if (found) {
-                    setSearchTerm(text);
-                    handleOpenModal(found);
+                if (view === 'sales') {
+                    if (found) addToCart(found);
+                    else alert("Barang tidak terdaftar!");
                 } else {
-                    handleOpenModal(null, text);
+                    if (found) handleOpenModal(found);
+                    else handleOpenModal(null, text);
                 }
             };
 
+            // Inventory Actions
             const handleOpenModal = (item = null, scannedBarcode = '') => {
                 if (item) {
                     setEditingItem(item);
@@ -112,92 +181,215 @@
                 setIsModalOpen(true);
             };
 
-            const handleSave = (e) => {
+            const handleSave = async (e) => {
                 e.preventDefault();
-                if (editingItem) {
-                    setItems(items.map(i => i.id === editingItem.id ? { ...formData, id: i.id } : i));
-                } else {
-                    setItems([...items, { ...formData, id: Date.now() }]);
+                if (!user) return;
+                const { collection, doc, setDoc, addDoc } = window.FirebaseSDK;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const itemsCol = collection(window.db, 'artifacts', appId, 'public', 'data', 'items');
+
+                try {
+                    if (editingItem) {
+                        await setDoc(doc(itemsCol, editingItem.id), formData);
+                    } else {
+                        await addDoc(itemsCol, formData);
+                    }
+                    setIsModalOpen(false);
+                } catch (err) {
+                    alert("Gagal menyimpan data!");
                 }
-                setIsModalOpen(false);
             };
 
+            const handleDelete = async (id) => {
+                if (!user || !confirm('Hapus barang ini?')) return;
+                const { collection, doc, deleteDoc } = window.FirebaseSDK;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                try {
+                    await deleteDoc(doc(window.db, 'artifacts', appId, 'public', 'data', 'items', id));
+                } catch (err) {
+                    alert("Gagal menghapus!");
+                }
+            };
+
+            // Sales Actions
+            const addToCart = (item) => {
+                if (item.stock <= 0) return alert("Stok habis!");
+                const existing = cart.find(c => c.id === item.id);
+                if (existing) {
+                    if (existing.qty >= item.stock) return alert("Batas stok!");
+                    setCart(cart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c));
+                } else {
+                    setCart([...cart, { ...item, qty: 1 }]);
+                }
+            };
+
+            const checkout = async () => {
+                if (cart.length === 0 || !user) return;
+                const { collection, addDoc, doc, updateDoc } = window.FirebaseSDK;
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                
+                const transaction = {
+                    date: new Date().toLocaleString(),
+                    timestamp: new Date().toISOString(),
+                    items: cart.map(({id, name, qty, price}) => ({id, name, qty, price})),
+                    total: cart.reduce((acc, curr) => acc + (curr.price * curr.qty), 0)
+                };
+
+                try {
+                    // 1. Save Transaction
+                    const trxRef = await addDoc(collection(window.db, 'artifacts', appId, 'public', 'data', 'sales'), transaction);
+                    
+                    // 2. Update Stock
+                    for (const item of cart) {
+                        const itemRef = doc(window.db, 'artifacts', appId, 'public', 'data', 'items', item.id);
+                        await updateDoc(itemRef, { stock: item.stock - item.qty });
+                    }
+
+                    setLastTransaction({ ...transaction, id: trxRef.id });
+                    setCart([]);
+                } catch (err) {
+                    alert("Gagal memproses transaksi!");
+                }
+            };
+
+            if (isLoading) return (
+                <div className="min-h-screen flex items-center justify-center bg-slate-50">
+                    <div className="flex flex-col items-center gap-4">
+                        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                        <p className="text-slate-500 font-bold">Menghubungkan ke Cloud...</p>
+                    </div>
+                </div>
+            );
+
             return (
-                <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto">
-                    <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-                        <div>
-                            <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-2">StokKu</h1>
-                            <p className="text-slate-500">Inventory & Barcode Scanner</p>
+                <div className="min-h-screen bg-slate-50 pb-20">
+                    <nav className="bg-white border-b sticky top-0 z-40 no-print">
+                        <div className="max-w-7xl mx-auto px-4 flex justify-between items-center h-16">
+                            <div className="flex items-center gap-2 font-bold text-xl text-blue-600">
+                                <Icon name="Package" /> <span>StokKu</span>
+                            </div>
+                            <div className="flex gap-2 md:gap-4">
+                                <button onClick={() => setView('inventory')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'inventory' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
+                                    <Icon name="LayoutDashboard" size={18} /> <span className="hidden md:inline">Stok</span>
+                                </button>
+                                <button onClick={() => setView('sales')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'sales' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
+                                    <Icon name="ShoppingCart" size={18} /> <span className="hidden md:inline">Jual</span>
+                                </button>
+                                <button onClick={() => setView('history')} className={`p-2 rounded-lg flex items-center gap-2 ${view === 'history' ? 'text-blue-600 bg-blue-50' : 'text-slate-400'}`}>
+                                    <Icon name="History" size={18} /> <span className="hidden md:inline">Riwayat</span>
+                                </button>
+                            </div>
                         </div>
-                        <div className="flex gap-2 w-full md:w-auto">
-                            <button onClick={startScanner} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white border-2 border-blue-600 text-blue-600 px-4 py-2 rounded-xl font-bold">
-                                <Icon name="ScanLine" /> Scan
-                            </button>
-                            <button onClick={() => handleOpenModal()} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl font-bold shadow-lg shadow-blue-200">
-                                <Icon name="Plus" /> Tambah
-                            </button>
+                    </nav>
+
+                    <main className="max-w-7xl mx-auto p-4 md:p-8 no-print">
+                        {view === 'inventory' && (
+                            <div>
+                                <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+                                    <h1 className="text-2xl font-bold">Daftar Inventaris</h1>
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <button onClick={startScanner} className="flex-1 bg-white border-2 border-blue-600 text-blue-600 px-4 py-2 rounded-xl font-bold flex justify-center gap-2"><Icon name="ScanLine" /> Scan</button>
+                                        <button onClick={() => handleOpenModal()} className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-xl font-bold shadow-lg flex justify-center gap-2"><Icon name="Plus" /> Tambah</button>
+                                    </div>
+                                </header>
+                                <div className="bg-white p-4 rounded-2xl border mb-6 flex gap-4">
+                                    <input type="text" placeholder="Cari barang atau barcode..." className="flex-1 bg-slate-50 border p-2 rounded-lg" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                                </div>
+                                <div className="bg-white rounded-2xl border overflow-hidden shadow-sm">
+                                    <table className="w-full text-left">
+                                        <thead className="bg-slate-50 text-slate-600 text-sm">
+                                            <tr><th className="p-4">Produk</th><th className="p-4">Stok</th><th className="p-4">Harga</th><th className="p-4 text-right">Aksi</th></tr>
+                                        </thead>
+                                        <tbody className="divide-y">
+                                            {filteredItems.map(item => (
+                                                <tr key={item.id} className="hover:bg-slate-50">
+                                                    <td className="p-4">
+                                                        <div className="font-bold">{item.name}</div>
+                                                        <div className="text-xs text-slate-400 font-mono">{item.barcode}</div>
+                                                    </td>
+                                                    <td className="p-4">
+                                                        {item.stock} {item.unit}
+                                                        {item.stock <= item.minStock && <div className="text-[10px] text-amber-500 font-bold uppercase mt-1">Stok Rendah</div>}
+                                                    </td>
+                                                    <td className="p-4">Rp {item.price.toLocaleString()}</td>
+                                                    <td className="p-4 text-right flex justify-end gap-2">
+                                                        <button onClick={() => handleOpenModal(item)} className="p-2 text-slate-400 hover:text-blue-600"><Icon name="Edit3" size={18} /></button>
+                                                        <button onClick={() => handleDelete(item.id)} className="p-2 text-slate-400 hover:text-red-600"><Icon name="Trash2" size={18} /></button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {view === 'sales' && (
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                <div className="lg:col-span-2">
+                                    <div className="flex justify-between items-center mb-6">
+                                        <h1 className="text-2xl font-bold">Kasir</h1>
+                                        <button onClick={startScanner} className="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2"><Icon name="ScanLine" /> Scan</button>
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        {items.filter(i => i.stock > 0).map(item => (
+                                            <button key={item.id} onClick={() => addToCart(item)} className="bg-white p-4 rounded-xl border text-left hover:border-blue-500 transition-all flex flex-col justify-between shadow-sm">
+                                                <div><div className="font-bold text-slate-800">{item.name}</div><div className="text-xs text-slate-400 mb-2">Stok: {item.stock} {item.unit}</div></div>
+                                                <div className="text-blue-600 font-bold italic">Rp {item.price.toLocaleString()}</div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="bg-white rounded-3xl border shadow-sm p-6 flex flex-col h-fit sticky top-24">
+                                    <h2 className="text-lg font-bold mb-4 border-b pb-4">Keranjang</h2>
+                                    <div className="space-y-4 mb-6">
+                                        {cart.length === 0 ? <div className="text-center py-8 text-slate-400 italic">Kosong</div> : cart.map(item => (
+                                            <div key={item.id} className="flex justify-between items-start">
+                                                <div><div className="font-bold text-sm">{item.name}</div><div className="text-xs text-slate-500">{item.qty} x Rp {item.price.toLocaleString()}</div></div>
+                                                <div className="flex items-center gap-2 font-bold">Rp {(item.qty * item.price).toLocaleString()} <button onClick={() => setCart(cart.filter(c=>c.id!==item.id))} className="text-red-400"><Icon name="X" size={14} /></button></div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="border-t pt-4 space-y-4">
+                                        <div className="flex justify-between text-xl font-bold"><span>Total</span><span className="text-blue-600">Rp {cart.reduce((a,c)=>a+(c.price*c.qty),0).toLocaleString()}</span></div>
+                                        <button onClick={checkout} disabled={cart.length === 0} className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold disabled:bg-slate-200">Proses Transaksi</button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {view === 'history' && (
+                            <div>
+                                <h1 className="text-2xl font-bold mb-8">Riwayat Penjualan</h1>
+                                <div className="space-y-4">
+                                    {salesHistory.length === 0 ? <div className="bg-white p-12 text-center text-slate-400 rounded-3xl border border-dashed">Belum ada data</div> : salesHistory.map(trx => (
+                                        <div key={trx.id} className="bg-white p-6 rounded-2xl border flex flex-col md:flex-row justify-between gap-4 shadow-sm">
+                                            <div><div className="font-bold text-blue-600">{trx.id}</div><div className="text-xs text-slate-400 mb-2">{trx.date}</div><div className="text-sm">{trx.items.map(i => `${i.name} (${i.qty})`).join(', ')}</div></div>
+                                            <div className="flex flex-col md:items-end justify-between"><div className="font-bold text-lg">Rp {trx.total.toLocaleString()}</div><button onClick={() => { setLastTransaction(trx); setTimeout(() => window.print(), 500); }} className="text-blue-600 text-sm font-bold flex items-center gap-1"><Icon name="Printer" size={14} /> Cetak Struk</button></div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Receipt (Print Mode) */}
+                    {lastTransaction && (
+                        <div id="receipt-print" className="hidden print:block p-8 bg-white max-w-[80mm] mx-auto text-[10px]">
+                            <div className="text-center border-b border-dashed pb-4 mb-4 font-bold"><h2 className="text-lg">STOKKU</h2><p>Terima Kasih</p><p>{lastTransaction.date}</p></div>
+                            <div className="mb-4 space-y-1">{lastTransaction.items.map(item => (
+                                <div key={item.id} className="flex justify-between"><span>{item.name} x{item.qty}</span><span>Rp {(item.qty*item.price).toLocaleString()}</span></div>
+                            ))}</div>
+                            <div className="border-t border-dashed pt-4 flex justify-between font-bold text-sm"><span>TOTAL</span><span>Rp {lastTransaction.total.toLocaleString()}</span></div>
                         </div>
-                    </header>
+                    )}
 
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                        <StatCard title="Total" value={stats.total} color="bg-blue-50" icon="Package" />
-                        <StatCard title="Menipis" value={stats.low} color="bg-amber-50" icon="AlertTriangle" />
-                        <StatCard title="Habis" value={stats.empty} color="bg-red-50" icon="X" />
-                        <StatCard title="Nilai" value={`Rp ${stats.value.toLocaleString()}`} color="bg-emerald-50" icon="ArrowUpRight" />
-                    </div>
-
-                    <div className="bg-white p-4 rounded-2xl border mb-6 flex flex-col md:flex-row gap-4">
-                        <input 
-                            type="text" placeholder="Cari barang atau barcode..." 
-                            className="flex-1 bg-slate-50 border p-2 rounded-lg"
-                            value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
-                        />
-                        <select className="bg-slate-50 border p-2 rounded-lg" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
-                            {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                    </div>
-
-                    <div className="bg-white rounded-2xl border overflow-hidden">
-                        <table className="w-full text-left">
-                            <thead className="bg-slate-50 text-slate-600 text-sm">
-                                <tr>
-                                    <th className="p-4">Produk</th>
-                                    <th className="p-4">Stok</th>
-                                    <th className="p-4">Status</th>
-                                    <th className="p-4 text-right">Aksi</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y">
-                                {filteredItems.map(item => (
-                                    <tr key={item.id} className="hover:bg-slate-50">
-                                        <td className="p-4">
-                                            <div className="font-bold">{item.name}</div>
-                                            <div className="text-xs text-slate-400 font-mono">{item.barcode}</div>
-                                        </td>
-                                        <td className="p-4">{item.stock} {item.unit}</td>
-                                        <td className="p-4">
-                                            {item.stock <= 0 ? <span className="text-red-500 font-bold text-xs">HABIS</span> : 
-                                             item.stock <= item.minStock ? <span className="text-amber-500 font-bold text-xs">MENIPIS</span> : 
-                                             <span className="text-emerald-500 font-bold text-xs">AMAN</span>}
-                                        </td>
-                                        <td className="p-4 text-right flex justify-end gap-2">
-                                            <button onClick={() => handleOpenModal(item)} className="p-2 text-slate-400 hover:text-blue-600"><Icon name="Edit3" size={18} /></button>
-                                            <button onClick={() => {if(confirm('Hapus?')) setItems(items.filter(i=>i.id!==item.id))}} className="p-2 text-slate-400 hover:text-red-600"><Icon name="Trash2" size={18} /></button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-
+                    {/* Scanner & Modal UI */}
                     {isScannerOpen && (
                         <div className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4">
-                            <div className="bg-white w-full max-w-md rounded-3xl overflow-hidden">
-                                <div className="p-4 border-b flex justify-between items-center">
-                                    <h3 className="font-bold">Scan Barcode</h3>
-                                    <button onClick={stopScanner} className="p-2 bg-slate-100 rounded-full"><Icon name="X" /></button>
-                                </div>
-                                <div id="reader" className="bg-black"></div>
+                            <div className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl">
+                                <div className="p-4 border-b flex justify-between items-center"><h3 className="font-bold">Scan Barcode</h3><button onClick={stopScanner} className="p-2 bg-slate-100 rounded-full"><Icon name="X" /></button></div>
+                                <div id="reader"></div>
                                 <button onClick={stopScanner} className="w-full p-4 bg-slate-800 text-white font-bold uppercase tracking-widest">Tutup Kamera</button>
                             </div>
                         </div>
@@ -207,38 +399,21 @@
                         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
                             <form onSubmit={handleSave} className="bg-white w-full max-w-md rounded-3xl p-6 space-y-4">
                                 <h2 className="text-xl font-bold">{editingItem ? 'Edit' : 'Tambah'} Barang</h2>
-                                <div className="bg-blue-50 p-3 rounded-xl">
-                                    <label className="text-[10px] font-bold text-blue-600">BARCODE</label>
-                                    <input className="w-full bg-transparent border-none p-0 focus:ring-0 text-lg font-mono" value={formData.barcode} onChange={e => setFormData({...formData, barcode: e.target.value})} />
+                                <div className="bg-blue-50 p-3 rounded-xl border border-blue-100 flex items-center gap-2">
+                                    <div className="flex-1"><label className="text-[10px] font-bold text-blue-600 block uppercase">Barcode</label><input className="w-full bg-transparent border-none p-0 focus:ring-0 text-lg font-mono" value={formData.barcode} onChange={e => setFormData({...formData, barcode: e.target.value})} /></div>
+                                    <Icon name="ScanLine" className="text-blue-400" />
                                 </div>
                                 <input placeholder="Nama Barang" className="w-full border p-2 rounded-lg" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} required />
-                                <div className="grid grid-cols-2 gap-2">
-                                    <input placeholder="Kategori" className="border p-2 rounded-lg" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} required />
-                                    <input placeholder="Satuan (Pcs/Rim)" className="border p-2 rounded-lg" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})} required />
-                                </div>
-                                <div className="grid grid-cols-2 gap-2">
-                                    <input type="number" placeholder="Stok" className="border p-2 rounded-lg" value={formData.stock} onChange={e => setFormData({...formData, stock: parseInt(e.target.value)})} required />
-                                    <input type="number" placeholder="Min. Stok" className="border p-2 rounded-lg" value={formData.minStock} onChange={e => setFormData({...formData, minStock: parseInt(e.target.value)})} required />
-                                </div>
+                                <div className="grid grid-cols-2 gap-2"><input placeholder="Kategori" className="border p-2 rounded-lg" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} required /><input placeholder="Satuan" className="border p-2 rounded-lg" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})} required /></div>
+                                <div className="grid grid-cols-2 gap-2"><input type="number" placeholder="Stok" className="border p-2 rounded-lg" value={formData.stock} onChange={e => setFormData({...formData, stock: parseInt(e.target.value)})} required /><input type="number" placeholder="Min. Stok" className="border p-2 rounded-lg" value={formData.minStock} onChange={e => setFormData({...formData, minStock: parseInt(e.target.value)})} required /></div>
                                 <input type="number" placeholder="Harga Jual" className="w-full border p-2 rounded-lg" value={formData.price} onChange={e => setFormData({...formData, price: parseInt(e.target.value)})} required />
-                                <button type="submit" className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl shadow-lg">Simpan</button>
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="w-full py-2 text-slate-400">Batal</button>
+                                <div className="flex gap-2 pt-2"><button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 py-3 text-slate-500 font-bold">Batal</button><button type="submit" className="flex-[2] py-3 bg-blue-600 text-white font-bold rounded-xl shadow-lg">Simpan ke Cloud</button></div>
                             </form>
                         </div>
                     )}
                 </div>
             );
         };
-
-        const StatCard = ({ title, value, icon, color }) => (
-            <div className={`${color} p-4 rounded-2xl border border-white flex flex-col`}>
-                <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">{title}</span>
-                    <Icon name={icon} size={16} className="text-slate-400" />
-                </div>
-                <div className="text-lg font-bold truncate">{value}</div>
-            </div>
-        );
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
